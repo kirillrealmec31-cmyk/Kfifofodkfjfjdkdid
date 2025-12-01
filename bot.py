@@ -7,6 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
 
 # ---------------- CONFIG ----------------
 TOKEN = "8180575933:AAFECe4o9hDGf5mEDrNBJoNek9B9m8Ak-2I"
@@ -14,14 +15,14 @@ ADMINS = [7569239259, 7825456486, 7983497123]
 DB_PATH = "bot.db"
 
 router = Router()
-storage = MemoryStorage()  # Для FSM
+storage = MemoryStorage()
 
 # ---------------- ANTI-SPAM ----------------
 last_message = {}  
 last_request = {}  
 
 SPAM_DELAY = 3
-REQUEST_DELAY = 60
+REQUEST_DELAY = 86400  # 1 сутки
 
 async def antispam(msg: Message) -> bool:
     uid = msg.from_user.id
@@ -136,7 +137,7 @@ class RejectForm(StatesGroup):
 @router.message(F.text == "/start")
 async def start_cmd(msg: Message):
     await msg.answer(
-        "Добро пожаловать в бота защиты от @Nightfall_Retribution!\n\n"
+        "Добро пожаловать в бота защиты!\n\n"
         "Вы можете запросить защиту, если:\n"
         "- вам угрожают деаноном\n"
         "- вы не виноваты в конфликте\n"
@@ -150,15 +151,15 @@ async def start_cmd(msg: Message):
 async def request_help(cb: CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
     now = time.time()
+
     if uid in last_request and now - last_request[uid] < REQUEST_DELAY:
-        await cb.answer(
-            f"Подождите {int(REQUEST_DELAY - (now - last_request[uid]))} секунд.",
-            show_alert=True
-        )
+        remaining = int(REQUEST_DELAY - (now - last_request[uid]))
+        hours = remaining // 3600
+        await cb.answer(f"❗ Заявку можно отправлять только раз в сутки.\nОсталось: {hours} ч.", show_alert=True)
         return
 
     await cb.message.answer(
-        "Опишите проблему и отправьте **минимум 2 скриншота** (по одному).\n"
+        "Опишите проблему и отправьте **минимум 2 скриншота**.\n"
         "После этого нажмите кнопку ниже.",
         reply_markup=provide_button()
     )
@@ -186,14 +187,19 @@ async def handle_photo(msg: Message, state: FSMContext):
 @router.callback_query(F.data == "provide_request")
 async def provide_request(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+
     if "photos" not in data or len(data["photos"]) < 2:
         await cb.answer("Минимум 2 скриншота!", show_alert=True)
         return
+
     user = cb.from_user
     last_request[user.id] = time.time()
+
     req_id = await create_request(user.id, user.username, data["text"])
+
     for ph in data["photos"]:
         await add_photo(req_id, ph)
+
     for admin in ADMINS:
         try:
             await cb.bot.send_message(
@@ -206,6 +212,7 @@ async def provide_request(cb: CallbackQuery, state: FSMContext):
                 await cb.bot.send_photo(admin, ph)
         except:
             pass
+
     await cb.message.answer("Ваш запрос отправлен!")
     await state.clear()
     await cb.answer()
@@ -235,16 +242,19 @@ async def reject(cb: CallbackQuery, state: FSMContext):
 async def reject_text(msg: Message, state: FSMContext):
     if await antispam(msg):
         return
+
     data = await state.get_data()
     req_id = data["req_id"]
     text = msg.text
     owner = await get_request_owner(req_id)
+
     if owner:
         try:
-            await msg.bot.send_message(owner, f"❌ Ваш запрос №{req_id} был отклонён.\nПричина:\n{text}")
+            await msg.bot.send_message(owner, f"❌ Запрос №{req_id} отклонён.\nПричина:\n{text}")
         except:
             pass
-    await msg.answer("Отказ отправлен пользователю.")
+
+    await msg.answer("Отказ отправлен.")
     await state.clear()
 
 # --- FEEDBACK ---
@@ -258,21 +268,33 @@ async def start_fb(cb: CallbackQuery, state: FSMContext):
 async def feedback(msg: Message, state: FSMContext):
     if await antispam(msg):
         return
+
     fb_id = await save_feedback(msg.from_user.id, msg.from_user.username, msg.text)
+
     for admin in ADMINS:
         try:
-            await msg.bot.send_message(admin, f"Отзыв №{fb_id}\n\nТекст: {msg.text}\nАвтор: @{msg.from_user.username}")
+            await msg.bot.send_message(
+                admin,
+                f"Отзыв №{fb_id}\n\nТекст: {msg.text}\nОт: @{msg.from_user.username}"
+            )
         except:
             pass
+
     await msg.answer("Спасибо! Ваш отзыв отправлен.")
     await state.clear()
 
-# ---------------- RUN BOT ----------------
+# --------------- RUN BOT ----------------
 async def main():
     await init_db()
-    bot = Bot(TOKEN, parse_mode="HTML")
+
+    bot = Bot(
+        TOKEN,
+        default=DefaultBotProperties(parse_mode="HTML")
+    )
+
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
