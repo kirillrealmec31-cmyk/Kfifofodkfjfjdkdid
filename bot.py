@@ -20,13 +20,48 @@ from telegram.ext import (
     filters,
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ----------------- ВАШИ ВКЛЮЧЕННЫЕ ДАННЫЕ (НЕ ИЗМЕНЯТЬ) -----------------
+BOT_TOKEN = "8180575933:AAFECe4o9hDGf5mEDrNBJoNek9B9m8Ak-2I"
+ADMINS = [8180575933, 7569239259, 7825456486, 7605589697, 7983497123]
+# --------------------------------------------------------------------------------
 
 DATA_FILE = Path("data.json")
-ADMINS = [6931537294]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-# ------------------ КЛАВИАТУРЫ ------------------
+# Инициализация файла данных, если нет
+if not DATA_FILE.exists():
+    DATA_FILE.write_text(json.dumps({
+        "next_request_id": 1,
+        "requests": {},
+        "next_review_id": 1,
+        "reviews": {},
+        "user_review_cooldowns": {}
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_data():
+    if not DATA_FILE.exists():
+        return {
+            "requests": {},
+            "next_request_id": 1,
+            "reviews": {},
+            "next_review_id": 1,
+            "user_review_cooldowns": {}
+        }
+    return json.loads(DATA_FILE.read_text(encoding="utf-8"))
+
+
+def save_data(data):
+    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ----------------- ПАМЯТЬ В ПАМЯТИ -----------------
+pending_reports = {}               # user_id -> {"text": str or None, "files": [{file_id, type}]}
+awaiting_rejection_reason = {}     # admin_id -> {"request_id": id}
+# ---------------------------------------------------------------------------------------
+
+# ----------------- Клавиатуры -----------------
 KB_START = InlineKeyboardMarkup(
     [[
         InlineKeyboardButton("Запросить помощь", callback_data="start_request"),
@@ -35,7 +70,10 @@ KB_START = InlineKeyboardMarkup(
 )
 
 KB_SUBMIT = InlineKeyboardMarkup(
-    [[InlineKeyboardButton("Предоставить на рассмотрение", callback_data="submit_request")]]
+    [[
+        InlineKeyboardButton("Предоставить на рассмотрение", callback_data="submit_request"),
+        InlineKeyboardButton("Назад", callback_data="go_menu")
+    ]]
 )
 
 KB_BACK_TO_MENU = InlineKeyboardMarkup(
@@ -49,225 +87,299 @@ KB_ADMIN_ACTIONS = InlineKeyboardMarkup(
     ]]
 )
 
-# ------------------ ПАМЯТЬ ------------------
-pending_reports = {}
-awaiting_rejection_reason = {}
-
-# ------------------ ВСПОМОГАТЕЛЬНЫЕ ------------------
-def load_data():
-    if not DATA_FILE.exists():
-        return {
-            "requests": {},
-            "next_request_id": 1,
-            "reviews": {},
-            "next_review_id": 1,
-            "user_review_cooldowns": {}
-        }
-    return json.loads(DATA_FILE.read_text())
+WELCOME_TEXT = "Главное меню"
 
 
-def save_data(data):
-    DATA_FILE.write_text(json.dumps(data, indent=4, ensure_ascii=False))
-
-
+# ----------------- ХЕЛПЕРЫ -----------------
 def user_display_name(user):
-    return f"@{user.username}" if user.username else f"{user.first_name}"
+    if user is None:
+        return "Unknown"
+    if getattr(user, "username", None):
+        return f"@{user.username}"
+    return f"{user.first_name or ''} {user.last_name or ''}".strip() or str(user.id)
 
 
-# ------------------ СТАРТ ------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Главное меню", reply_markup=KB_START)
+# ----------------- ОБРАБОТЧИКИ -----------------
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Поддержка как команды /start (message) так и колбэка "go_menu"
+    target_chat = update.effective_chat.id if update.effective_chat else (update.message.chat_id if update.message else None)
+    if target_chat:
+        await context.bot.send_message(chat_id=target_chat, text=WELCOME_TEXT, reply_markup=KB_START)
 
 
-# ------------------ ИНЛАЙН КНОПКИ ------------------
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    uid = query.from_user.id
+    if query is None:
+        return
     await query.answer()
+    user = query.from_user
+    uid = user.id
+    data = query.data
 
-    # УДАЛЯЕМ СТАРОЕ СООБЩЕНИЕ
+    # удаляем сообщение с кнопкой, откуда пришёл клик (чтобы не засорять чат)
     try:
-        await query.message.delete()
+        if query.message:
+            await query.message.delete()
     except Exception:
         pass
 
-    if query.data == "go_menu":
-        await context.bot.send_message(chat_id=uid, text="Главное меню", reply_markup=KB_START)
+    # главная навигация
+    if data == "go_menu":
+        await context.bot.send_message(chat_id=uid, text=WELCOME_TEXT, reply_markup=KB_START)
         return
 
-    # --- Старт заявки помощи ---
-    if query.data == "start_request":
+    # начало заявки
+    if data == "start_request":
         pending_reports[uid] = {"text": None, "files": []}
-        await context.bot.send_message(
-            chat_id=uid,
-            text="Опишите вашу проблему или отправьте доказательства.",
-            reply_markup=KB_SUBMIT
-        )
+        await context.bot.send_message(chat_id=uid, text="Опишите вашу проблему или отправьте доказательства.", reply_markup=KB_SUBMIT)
         return
 
-    # --- Сабмит заявки ---
-    if query.data == "submit_request":
-        rep = pending_reports.get(uid)
-        if not rep:
-            await context.bot.send_message(chat_id=uid, text="Вы ещё не начали заявку.", reply_markup=KB_START)
+    # отправка заявки
+    if data == "submit_request":
+        pr = pending_reports.get(uid)
+        if not pr:
+            await context.bot.send_message(chat_id=uid, text="Вы ещё не начали заявку. Нажмите 'Запросить помощь'.", reply_markup=KB_START)
             return
 
-        data = load_data()
-        rid = data["next_request_id"]
-        data["next_request_id"] += 1
+        if not pr["text"] or len(pr["files"]) < 2:
+            await context.bot.send_message(chat_id=uid, text="Пожалуйста, опишите ситуацию и прикрепите не менее 2 фото/видео доказательств.", reply_markup=KB_SUBMIT)
+            return
 
-        data["requests"][str(rid)] = {
+        data_store = load_data()
+        rid = data_store["next_request_id"]
+        data_store["next_request_id"] += 1
+
+        data_store["requests"][str(rid)] = {
             "user_id": uid,
-            "username": "",
-            "text": rep["text"] or "",
-            "files": rep["files"],
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "pending",
-            "admin_messages": {}
+            "username": user.username or "",
+            "text": pr["text"] or "",
+            "files": pr["files"],
+            "admin_messages": {},
+            "status": "open",
+            "created_at": datetime.utcnow().isoformat()
         }
-        save_data(data)
+        save_data(data_store)
 
-        # Отправляем админу
-        for adm in ADMINS:
+        admin_message_text = (
+            f"❗ ЗАПРОС ПОМОЩИ №{rid} ❗\n"
+            f"{pr['text'] or '(без текста)'}\n\n"
+            f"Запросил: {user_display_name(user)}"
+        )
+
+        for admin_id in ADMINS:
             try:
-                msg = await context.bot.send_message(
-                    chat_id=adm,
-                    text=f"НОВАЯ ЗАЯВКА №{rid}\nОт: {user_display_name(query.from_user)}\n\n{rep['text'] or '(без текста)'}",
-                    reply_markup=KB_ADMIN_ACTIONS
-                )
-                data = load_data()
-                data["requests"][str(rid)]["admin_messages"][str(adm)] = msg.message_id
-                save_data(data)
+                sent = await context.bot.send_message(chat_id=admin_id, text=admin_message_text, reply_markup=KB_ADMIN_ACTIONS)
+                data_store = load_data()
+                data_store["requests"][str(rid)]["admin_messages"][str(admin_id)] = sent.message_id
+                save_data(data_store)
 
-                for f in rep["files"]:
-                    if f["type"] == "photo":
-                        await context.bot.send_photo(adm, f["file_id"])
-                    else:
-                        await context.bot.send_video(adm, f["file_id"])
-
+                # отправляем медиа отдельно (по одному)
+                for f in pr["files"]:
+                    if f.get("type") == "photo":
+                        await context.bot.send_photo(chat_id=admin_id, photo=f["file_id"])
+                    elif f.get("type") == "video":
+                        await context.bot.send_video(chat_id=admin_id, video=f["file_id"])
             except Exception:
-                logger.exception("ADMIN ERROR")
+                logger.exception(f"Не удалось отправить админ-уведомление админ {admin_id}")
 
-        del pending_reports[uid]
-
-        # ВОЗВРАТ В МЕНЮ
-        await context.bot.send_message(chat_id=uid, text="Заявка отправлена администрации.", reply_markup=KB_START)
+        # удаляем локальную pending-заявку и возвращаем пользователя в главное меню
+        pending_reports.pop(uid, None)
+        await context.bot.send_message(chat_id=uid, text="Запрос отправлен администрации.", reply_markup=KB_START)
         return
 
-    # --- Пишем отзыв ---
-    if query.data == "write_thanks":
+    # отзыв (переходим в режим ожидания текста отзыва)
+    if data == "write_thanks":
         context.user_data["awaiting_review"] = True
-        await context.bot.send_message(
-            chat_id=uid,
-            text="Пожалуйста напишите отзыв о нашей работе.",
-            reply_markup=KB_BACK_TO_MENU
-        )
+        await context.bot.send_message(chat_id=uid, text="Пожалуйста напишите отзыв о нашей работе.", reply_markup=KB_BACK_TO_MENU)
         return
 
-    # --- Админ: принять ---
-    if query.data == "admin_accept":
-        await query.message.edit_text("Вы приняли заявку.")
-        return
+    # действия админа
+    if data in ("admin_accept", "admin_reject"):
+        # чтобы понимать, с какой заявки — ищем request_id в data по message_id
+        msg = query.message
+        if msg is None:
+            return
 
-    # --- Админ: отказать ---
-    if query.data == "admin_reject":
-        text = (
-            "Пожалуйста укажите причину отказа.\n"
-            "Она будет отправлена пользователю."
-        )
-        awaiting_rejection_reason[uid] = {
-            "request_id": query.message.text.split("№")[1].split("\n")[0]
-        }
-        await context.bot.send_message(uid, text)
-        return
+        # Найдём request_id по message_id
+        found_rid = None
+        data_store = load_data()
+        for rid, rec in data_store["requests"].items():
+            admin_msgs = rec.get("admin_messages", {})
+            if str(query.from_user.id) in admin_msgs and admin_msgs[str(query.from_user.id)] == msg.message_id:
+                found_rid = rid
+                break
+            # также попробуем более общую проверку на наличие message_id в admin_messages
+            for adm_str, m_id in admin_msgs.items():
+                if m_id == msg.message_id:
+                    found_rid = rid
+                    break
+            if found_rid:
+                break
+
+        if not found_rid:
+            # Если не нашли, просто уведомим админа (или игнорируем)
+            try:
+                await context.bot.send_message(chat_id=uid, text="Не удалось определить заявку.")
+            except Exception:
+                pass
+            return
+
+        rid = found_rid
+        rec = data_store["requests"][rid]
+        if rec.get("status") != "open":
+            try:
+                await context.bot.send_message(chat_id=uid, text="Заявка уже обработана.")
+            except Exception:
+                pass
+            return
+
+        if data == "admin_accept":
+            rec["status"] = "accepted"
+            save_data(data_store)
+            requester_id = rec["user_id"]
+            admin_name = user_display_name(query.from_user)
+            try:
+                await context.bot.send_message(chat_id=requester_id, text=f"Ваш запрос приняли. Свяжется админ {admin_name}.")
+            except Exception:
+                logger.exception("Не удалось уведомить заявителя об принятии.")
+            # удалить сообщения админам
+            for adm_str, msg_id in rec.get("admin_messages", {}).items():
+                adm = int(adm_str)
+                try:
+                    await context.bot.delete_message(chat_id=adm, message_id=msg_id)
+                except Exception:
+                    pass
+            rec["admin_messages"] = {}
+            data_store[rid] = rec
+            save_data(data_store)
+            return
+
+        if data == "admin_reject":
+            # попросим причину у админа — пометим его в awaiting_rejection_reason
+            awaiting_rejection_reason[uid] = {"request_id": rid}
+            await context.bot.send_message(chat_id=uid, text="Пожалуйста, напишите причину отказа", reply_markup=KB_BACK_TO_MENU)
+            return
 
 
-# ------------------ ПОЛУЧЕНИЕ СООБЩЕНИЙ ------------------
+# ----------------- ОБРАБОТКА ТЕКСТОВ, ФОТО, ВИДЕО -----------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    if msg is None or msg.from_user is None:
+        return
     uid = msg.from_user.id
-    text = msg.text or ""
+    text = (msg.text or "").strip()
 
-    # ---------------- ОТЗЫВЫ — ОБРАБАТЫВАЕМ ПЕРВЫМИ ----------------
+    # 1) Если админ ранее нажимал "отказаться" — он должен написать причину
+    if uid in awaiting_rejection_reason:
+        info = awaiting_rejection_reason.pop(uid)
+        rid = info.get("request_id")
+        data_store = load_data()
+        rec = data_store["requests"].get(str(rid))
+        if not rec:
+            await context.bot.send_message(chat_id=uid, text="Заявка не найдена.")
+            return
+        rec["status"] = "rejected"
+        save_data(data_store)
+        # удаляем сообщения заявки у админов
+        for adm_str, msg_id in rec.get("admin_messages", {}).items():
+            adm = int(adm_str)
+            try:
+                await context.bot.delete_message(chat_id=adm, message_id=msg_id)
+            except Exception:
+                pass
+        # уведомляем пользователя — отправляем причину
+        reason = text
+        requester_id = rec["user_id"]
+        try:
+            await context.bot.send_message(chat_id=requester_id, text=f"Ваш запрос помощи был отклонен.  Причина: {reason}\nВы можете подать заявку снова через 24 часа")
+        except Exception:
+            logger.exception("Не удалось отправить сообщение об отказе пользователю.")
+        rec["admin_messages"] = {}
+        data_store["requests"][str(rid)] = rec
+        save_data(data_store)
+        return
+
+    # 2) Если пользователь в процессе составления заявки — добавляем текст как доказательство
+    # Но предварительно обработаем отзывы — они имеют приоритет
     if context.user_data.get("awaiting_review"):
-        context.user_data["awaiting_review"] = False
+        # Сначала подтвердим получение (как просили — "Доказательство принято!" первый отклик)
+        await context.bot.send_message(chat_id=uid, text="Доказательство принято!")
 
-        data = load_data()
+        review_text = text
         now = datetime.utcnow()
 
-        cooldowns = data["user_review_cooldowns"]
-        last = cooldowns.get(str(uid))
-
-        if last and now < datetime.fromisoformat(last) + timedelta(days=1):
-            await msg.reply_text(
-                "Вы можете оставить отзыв снова через 24 часа.",
-                reply_markup=KB_START
-            )
-            return
-
-        # Сохраняем отзыв
-        rid = data["next_review_id"]
-        data["next_review_id"] += 1
-
-        data["reviews"][str(rid)] = {
+        data_store = load_data()
+        rid = data_store["next_review_id"]
+        data_store["next_review_id"] += 1
+        data_store["reviews"][str(rid)] = {
             "user_id": uid,
             "username": msg.from_user.username or "",
-            "text": text,
+            "text": review_text,
             "timestamp": now.isoformat()
         }
+        data_store["user_review_cooldowns"][str(uid)] = now.isoformat()
+        save_data(data_store)
 
-        cooldowns[str(uid)] = now.isoformat()
-        save_data(data)
-
-        # Отправка админу
+        # уведомление админам
         for adm in ADMINS:
             try:
-                await context.bot.send_message(
-                    chat_id=adm,
-                    text=f"ОТЗЫВ №{rid}\nОт: {user_display_name(msg.from_user)}\n\n{text}"
-                )
+                await context.bot.send_message(chat_id=adm, text=f"Отзыв №{rid}\nТекст отзыва: {review_text}\nНаписал: {user_display_name(msg.from_user)}")
             except Exception:
                 pass
 
-        # Спасибо пользователю
-        await msg.reply_text(
-            "Благодарим вас за отзыв, он был переслан администрации",
-            reply_markup=KB_START
-        )
+        # благодарность пользователю и возврат в главное меню (без инлайн под благодарностью)
+        await context.bot.send_message(chat_id=uid, text="Благодарим вас за отзыв, он был переслан администрации", reply_markup=KB_START)
+        context.user_data["awaiting_review"] = False
         return
 
-    # ---------------- ДОКАЗАТЕЛЬСТВА ДЛЯ ЗАЯВКИ ----------------
+    # Теперь обработка добавления текста в заявку (если есть pending)
     if uid in pending_reports:
-        pending_reports[uid]["text"] = text
-        await msg.reply_text("Доказательство принято!")
+        if text:
+            pending_reports[uid]["text"] = text
+            await context.bot.send_message(chat_id=uid, text="Доказательство принято!", reply_markup=KB_SUBMIT)
         return
 
+    # Иначе — ничего не делаем
+    return
 
-# ------------------ ДОКАЗАТЕЛЬСТВА ФОТО/ВИДЕО ------------------
+
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.from_user.id
-    if uid in pending_reports:
-        pending_reports[uid]["files"].append({"file_id": update.message.photo[-1].file_id, "type": "photo"})
-        await update.message.reply_text("Доказательство принято!")
+    msg = update.message
+    if msg is None or msg.from_user is None:
+        return
+    uid = msg.from_user.id
+    if uid not in pending_reports:
+        return
+    photo = msg.photo[-1]
+    file_id = photo.file_id
+    pending_reports[uid]["files"].append({"file_id": file_id, "type": "photo"})
+    await context.bot.send_message(chat_id=uid, text=f"Доказательство принято! Сейчас прикреплено: {len(pending_reports[uid]['files'])}", reply_markup=KB_SUBMIT)
 
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.from_user.id
-    if uid in pending_reports:
-        pending_reports[uid]["files"].append({"file_id": update.message.video.file_id, "type": "video"})
-        await update.message.reply_text("Доказательство принято!")
+    msg = update.message
+    if msg is None or msg.from_user is None:
+        return
+    uid = msg.from_user.id
+    if uid not in pending_reports:
+        return
+    video = msg.video
+    file_id = video.file_id
+    pending_reports[uid]["files"].append({"file_id": file_id, "type": "video"})
+    await context.bot.send_message(chat_id=uid, text=f"Доказательство принято! Сейчас прикреплено: {len(pending_reports[uid]['files'])}", reply_markup=KB_SUBMIT)
 
 
-# ------------------ ЗАПУСК ------------------
+# ----------------- ОСНОВНАЯ -----------------
 def main():
-    app = ApplicationBuilder().token("YOUR_TOKEN").build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CallbackQueryHandler(callback_query_handler))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.VIDEO, video_handler))
 
+    logger.info("Бот запущен")
     app.run_polling()
 
 
