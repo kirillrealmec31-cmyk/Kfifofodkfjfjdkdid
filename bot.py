@@ -28,7 +28,6 @@ DATA_FILE = Path("data.json")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация файла данных
 if not DATA_FILE.exists():
     DATA_FILE.write_text(json.dumps({
         "next_request_id": 1,
@@ -90,7 +89,6 @@ REQUEST_INSTRUCTION = (
 )
 
 ASK_REVIEW_TEXT = "Пожалуйста напишите отзыв о нашей работе."
-THANK_REVIEW_USER = "Благодарим вас за уделённое время, ваш отзыв будет передан администрации"
 
 
 # ----------------- ХЕЛПЕР -----------------
@@ -113,7 +111,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     user = query.from_user
     uid = user.id
-
     data = query.data
 
     # ----------------- "Назад" -----------------
@@ -188,6 +185,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
+        # После отправки заявки — возвращаем в главное меню
         await context.bot.send_message(chat_id=uid, text="Запрос отправлен на рассмотрение.", reply_markup=KB_START)
         pending_reports.pop(uid, None)
         return
@@ -252,6 +250,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await context.bot.send_message(chat_id=uid, text="Пожалуйста, напишите причину отказа", reply_markup=KB_BACK)
             return
 
+
 # ----------------- Обработчики сообщений, фото и видео -----------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -296,18 +295,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Обработка отзывов
     if context.user_data.get("awaiting_review"):
-        data_store = load_data()
-        cooldowns = data_store.get("user_review_cooldowns", {})
-        last_iso = cooldowns.get(str(uid))
+        await context.bot.send_message(chat_id=uid, text="Доказательство принято!")
+        review_text = text
         now = datetime.utcnow()
-        if last_iso:
-            last = datetime.fromisoformat(last_iso)
-            if now < last + timedelta(days=1):
-                await context.bot.send_message(chat_id=uid, text="Вы можете оставить отзыв снова через 24 часа", reply_markup=KB_START)
-                context.user_data["awaiting_review"] = False
-                return
-        review_text = text or ""
-        rid = data_store["next_review_id"]
+        rid = load_data()["next_review_id"]
+
+        # Сохраняем отзыв в data.json
+        data_store = load_data()
         data_store["next_review_id"] += 1
         data_store["reviews"][str(rid)] = {
             "user_id": uid,
@@ -317,15 +311,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         data_store["user_review_cooldowns"][str(uid)] = now.isoformat()
         save_data(data_store)
-        await context.bot.send_message(chat_id=uid, text=THANK_REVIEW_USER, reply_markup=KB_START)
-        admin_text = f"Отзыв №{rid}\nТекст отзыва: {review_text}\nНаписал: {user_display_name(msg.from_user)}"
+
+        # Уведомляем пользователя и админов
+        await context.bot.send_message(chat_id=uid, text="Благодарим вас за отзыв, он был переслан администрации", reply_markup=KB_START)
         for adm in ADMINS:
             try:
-                await context.bot.send_message(chat_id=adm, text=admin_text)
+                await context.bot.send_message(chat_id=adm, text=f"Отзыв №{rid}\nТекст отзыва: {review_text}\nНаписал: {user_display_name(msg.from_user)}")
             except Exception:
                 pass
+
         context.user_data["awaiting_review"] = False
         return
+
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -338,6 +335,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = photo.file_id
     pending_reports[uid]["files"].append({"file_id": file_id, "type": "photo"})
     await context.bot.send_message(chat_id=uid, text="Доказательство принято!")
+
 
 async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -355,13 +353,11 @@ async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------- Основная функция -----------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CallbackQueryHandler(callback_query_handler))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.VIDEO, video_handler))
-
     logger.info("Бот запущен")
     app.run_polling()
 
