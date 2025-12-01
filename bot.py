@@ -2,30 +2,26 @@
 import time
 import aiosqlite
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardButton,
-)
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 
 # ---------------- CONFIG ----------------
-
 TOKEN = "8180575933:AAFECe4o9hDGf5mEDrNBJoNek9B9m8Ak-2I"
 ADMINS = [7569239259, 7825456486, 7983497123]
 DB_PATH = "bot.db"
 
 router = Router()
+storage = MemoryStorage()  # Для FSM
 
 # ---------------- ANTI-SPAM ----------------
+last_message = {}  
+last_request = {}  
 
-last_message = {}       # user_id: timestamp
-last_request = {}       # user_id: timestamp (отправка заявки)
-
-SPAM_DELAY = 3          # сек между сообщениями
-REQUEST_DELAY = 60      # сек между отправками запросов помощи
+SPAM_DELAY = 3
+REQUEST_DELAY = 60
 
 async def antispam(msg: Message) -> bool:
     uid = msg.from_user.id
@@ -42,9 +38,7 @@ async def antispam(msg: Message) -> bool:
     last_message[uid] = now
     return False
 
-
 # ---------------- DATABASE INIT ----------------
-
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -56,7 +50,6 @@ async def init_db():
                 status TEXT
             )
         """)
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS request_photos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +57,6 @@ async def init_db():
                 file_id TEXT
             )
         """)
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS feedback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +65,6 @@ async def init_db():
                 text TEXT
             )
         """)
-
         await db.commit()
 
 async def create_request(user_id, username, text):
@@ -95,9 +86,7 @@ async def add_photo(request_id, file_id):
 
 async def get_request_owner(request_id):
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT user_id FROM requests WHERE id = ?", (request_id,)
-        )
+        cur = await db.execute("SELECT user_id FROM requests WHERE id = ?", (request_id,))
         row = await cur.fetchone()
         return row[0] if row else None
 
@@ -110,9 +99,7 @@ async def save_feedback(user_id, username, text):
         await db.commit()
         return cur.lastrowid
 
-
 # ---------------- KEYBOARDS ----------------
-
 def start_keyboard():
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -134,9 +121,7 @@ def admin_keyboard(request_id):
     )
     return kb.as_markup()
 
-
 # ---------------- FSM ----------------
-
 class RequestForm(StatesGroup):
     waiting_text = State()
     waiting_photos = State()
@@ -147,9 +132,7 @@ class FeedbackForm(StatesGroup):
 class RejectForm(StatesGroup):
     waiting_text = State()
 
-
 # ---------------- HANDLERS ----------------
-
 @router.message(F.text == "/start")
 async def start_cmd(msg: Message):
     await msg.answer(
@@ -163,12 +146,9 @@ async def start_cmd(msg: Message):
     )
 
 # --- START REQUEST ---
-
 @router.callback_query(F.data == "request_help")
 async def request_help(cb: CallbackQuery, state: FSMContext):
     uid = cb.from_user.id
-
-    # антиспам — частые запросы помощи
     now = time.time()
     if uid in last_request and now - last_request[uid] < REQUEST_DELAY:
         await cb.answer(
@@ -189,7 +169,6 @@ async def request_help(cb: CallbackQuery, state: FSMContext):
 async def handle_text(msg: Message, state: FSMContext):
     if await antispam(msg):
         return
-
     await state.update_data(text=msg.text)
     await msg.answer("Отлично! Теперь отправьте минимум 2 скриншота.")
     await state.set_state(RequestForm.waiting_photos)
@@ -198,79 +177,56 @@ async def handle_text(msg: Message, state: FSMContext):
 async def handle_photo(msg: Message, state: FSMContext):
     if await antispam(msg):
         return
-
     data = await state.get_data()
     photos = data.get("photos", [])
     photos.append(msg.photo[-1].file_id)
     await state.update_data(photos=photos)
-
     await msg.answer(f"Скриншот получен ({len(photos)}).")
 
 @router.callback_query(F.data == "provide_request")
 async def provide_request(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-
     if "photos" not in data or len(data["photos"]) < 2:
         await cb.answer("Минимум 2 скриншота!", show_alert=True)
         return
-
     user = cb.from_user
-
-    last_request[user.id] = time.time()   # антиспам записи
-
+    last_request[user.id] = time.time()
     req_id = await create_request(user.id, user.username, data["text"])
-
     for ph in data["photos"]:
         await add_photo(req_id, ph)
-
-    # отправить админам
     for admin in ADMINS:
-        await cb.bot.send_message(
-            admin,
-            f"Запрос помощи №{req_id}\n\n"
-            f"Текст: {data['text']}\n"
-            f"От: @{user.username} (ID: {user.id})",
-            reply_markup=admin_keyboard(req_id)
-        )
-        for ph in data["photos"]:
-            await cb.bot.send_photo(admin, ph)
-
+        try:
+            await cb.bot.send_message(
+                admin,
+                f"Запрос помощи №{req_id}\n\n"
+                f"Текст: {data['text']}\nОт: @{user.username} (ID: {user.id})",
+                reply_markup=admin_keyboard(req_id)
+            )
+            for ph in data["photos"]:
+                await cb.bot.send_photo(admin, ph)
+        except:
+            pass
     await cb.message.answer("Ваш запрос отправлен!")
     await state.clear()
     await cb.answer()
 
 # --- ADMIN ACCEPT ---
-
 @router.callback_query(F.data.startswith("accept_"))
 async def accept(cb: CallbackQuery):
     req_id = int(cb.data.split("_")[1])
-    admin_id = cb.from_user.id
-
-    # уведомление юзеру
     owner = await get_request_owner(req_id)
     if owner:
         try:
             await cb.bot.send_message(owner, f"✅ Ваш запрос №{req_id} был ПРИНЯТ администратором.")
         except:
             pass
-
-    # убрать кнопки у остальных
-    for adm in ADMINS:
-        if adm != admin_id:
-            try:
-                await cb.bot.edit_message_reply_markup(adm, cb.message.message_id, reply_markup=None)
-            except:
-                pass
-
     await cb.answer("Запрос принят.")
 
 # --- ADMIN REJECT ---
-
 @router.callback_query(F.data.startswith("reject_"))
 async def reject(cb: CallbackQuery, state: FSMContext):
     req_id = int(cb.data.split("_")[1])
     await state.update_data(req_id=req_id)
-
     await cb.message.answer("Введите текст отказа:")
     await state.set_state(RejectForm.waiting_text)
     await cb.answer()
@@ -279,31 +235,19 @@ async def reject(cb: CallbackQuery, state: FSMContext):
 async def reject_text(msg: Message, state: FSMContext):
     if await antispam(msg):
         return
-
     data = await state.get_data()
     req_id = data["req_id"]
     text = msg.text
-
-    # уведомление юзеру
     owner = await get_request_owner(req_id)
     if owner:
         try:
             await msg.bot.send_message(owner, f"❌ Ваш запрос №{req_id} был отклонён.\nПричина:\n{text}")
         except:
             pass
-
-    # удалить кнопки
-    for adm in ADMINS:
-        try:
-            await msg.bot.edit_message_reply_markup(adm, msg.message_id - 1, reply_markup=None)
-        except:
-            pass
-
     await msg.answer("Отказ отправлен пользователю.")
     await state.clear()
 
 # --- FEEDBACK ---
-
 @router.callback_query(F.data == "send_feedback")
 async def start_fb(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Напишите отзыв:")
@@ -314,27 +258,20 @@ async def start_fb(cb: CallbackQuery, state: FSMContext):
 async def feedback(msg: Message, state: FSMContext):
     if await antispam(msg):
         return
-
     fb_id = await save_feedback(msg.from_user.id, msg.from_user.username, msg.text)
-
     for admin in ADMINS:
-        await msg.bot.send_message(
-            admin,
-            f"Отзыв №{fb_id}\n\n"
-            f"Текст: {msg.text}\n"
-            f"Автор: @{msg.from_user.username}"
-        )
-
+        try:
+            await msg.bot.send_message(admin, f"Отзыв №{fb_id}\n\nТекст: {msg.text}\nАвтор: @{msg.from_user.username}")
+        except:
+            pass
     await msg.answer("Спасибо! Ваш отзыв отправлен.")
     await state.clear()
 
-
 # ---------------- RUN BOT ----------------
-
 async def main():
     await init_db()
     bot = Bot(TOKEN, parse_mode="HTML")
-    dp = Dispatcher()
+    dp = Dispatcher(storage=storage)
     dp.include_router(router)
     await dp.start_polling(bot)
 
