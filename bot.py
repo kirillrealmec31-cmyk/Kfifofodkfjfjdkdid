@@ -197,7 +197,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                             await context.bot.send_video(chat_id=admin_id, video=f["file_id"])
                         else:
                             # безопасный fallback
-                            await context.bot.send_message(chat_id=admin_id, text="(Вложение: файл) " + str(f))
+                            await context.bot.send_message(chat_id=admin_id, text=f"Пользователю @{user_username} было отказано вами.", reply_markup=KB_BACK_TO_MENU)
                     except Exception:
                         logger.exception(f"Не удалось отправить медиа админу {admin_id}")
             except Exception:
