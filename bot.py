@@ -286,7 +286,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         # если админ отвергает — запросим причину у админа (в awaiting_rejection_reason)
         if data == "admin_reject":
             awaiting_rejection_reason[uid] = {"request_id": rid}
-            await context.bot.send_message(chat_id=admin_id, text=f"Пользователю @{user_username} было отказано вами.")а", reply_markup=KB_BACK_TO_MENU)
+            await context.bot.send_message(chat_id=admin_id, text=f"Пользователю @{user_username} было отказано вами.", reply_markup=KB_BACK_TO_MENU))
             return
 
 
