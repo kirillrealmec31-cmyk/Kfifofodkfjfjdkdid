@@ -77,6 +77,10 @@ KB_BACK_TO_MENU = InlineKeyboardMarkup(
     [[InlineKeyboardButton("Назад", callback_data="go_menu")]]
 )
 
+KB_MAIN_MENU = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("Главное меню", callback_data="go_menu")]]
+)
+
 KB_ADMIN_ACTIONS = InlineKeyboardMarkup(
     [[
         InlineKeyboardButton("принять запрос.", callback_data="admin_accept"),
@@ -179,9 +183,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(chat_id=uid, text="Пожалуйста напишите отзыв о нашей работе.", reply_markup=KB_BACK_TO_MENU)
         return
 
-    # --- здесь остальной callback: submit_request, admin_accept/reject ---
-    # код не изменен, кроме удаления сообщений админов у всех, кроме нажавшего
-
     if data == "submit_request":
         if uid not in pending_reports:
             await context.bot.send_message(chat_id=uid, text="У вас нет активной заявки", reply_markup=KB_START)
@@ -231,7 +232,11 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as e:
                 logger.error(f"Не удалось отправить админу {admin_id}: {e}")
 
-        await context.bot.send_message(chat_id=uid, text="Заявка отправлена на рассмотрение администраторам.", reply_markup=KB_START)
+        await context.bot.send_message(
+            chat_id=uid, 
+            text="Заявка отправлена на рассмотрение администраторам.", 
+            reply_markup=KB_MAIN_MENU
+        )
         del pending_reports[uid]
         return
 
@@ -339,7 +344,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await context.bot.send_message(chat_id=uid, text="Благодарим вас за отзыв, он был переслан администрации", reply_markup=KB_START)
+        await context.bot.send_message(
+            chat_id=uid, 
+            text="Благодарим вас за отзыв, он был переслан администрации", 
+            reply_markup=KB_MAIN_MENU
+        )
         context.user_data["awaiting_review"] = False
         return
 
